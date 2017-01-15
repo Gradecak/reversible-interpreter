@@ -186,7 +186,81 @@ prompt s = do
 
 interpret :: Statement -> IO ()
 interpret p = do
+    ((), x) <- runAnal $ analyse p
+    showWarnings x
     result <- runRun $ exec p
     case result of
       Right ((), env) -> return ()
       Left exn        ->  System.print ("Uncaught exception: "++exn)
+
+
+{- Static Analysis functions -}
+
+data VarState = Used   -- Variable Was initialised and Used
+              | Init   -- Variable has been initialsed but not used
+              deriving (Eq)
+
+type VarStates = Map.Map Name VarState -- a map of variable names to the state of the variables
+
+type Err a = StateT VarStates IO a
+
+runAnal p = runStateT p Map.empty
+
+analyse :: Statement -> Err ()
+analyse (Assign name v) = do
+    env <- get
+    state $ \s -> ((), Map.insert name Init s) -- set var status to initialised
+    return ()
+
+analyse (While expr s) = exprCheck expr >>= showError >> analyse s
+analyse (If expr s0 s1) = exprCheck expr >>= showError >> analyse s0 >> analyse s1
+analyse (Print expr) = exprCheck expr >>= showError
+analyse (Seq s0 s1) = analyse s0 >> analyse s1
+analyse (Try s0 s1) = analyse s0 >> analyse s1
+analyse Pass = return () -- for completeness sake
+
+showError :: Either String () -> Err ()
+showError (Left e)  = void $ liftIO (putStrLn e)
+showError (Right _) = return ()
+
+warningMsg :: (Name, VarState) -> IO ()
+warningMsg (n,_) = putStrLn ("WARNING: " ++ show n ++ " initialsed but never used")
+
+showWarnings :: VarStates -> IO ()
+showWarnings states = do
+    let x = Map.filter (/= Used) states
+        y = Map.toList x
+    mapM_ warningMsg y
+
+exprCheck :: Expr -> Err (Either String ())
+-- we are only interested in expressions where a variable is involved
+exprCheck (Add e0 e1) = exprCheck e0 >> exprCheck e1
+exprCheck (Sub e0 e1) = exprCheck e0 >> exprCheck e1
+exprCheck (Mul e0 e1) = exprCheck e0 >> exprCheck e1
+exprCheck (Div e0 e1) = exprCheck e0 >> exprCheck e1
+exprCheck (And e0 e1) = exprCheck e0 >> exprCheck e1
+exprCheck (Or e0 e1)  = exprCheck e0 >> exprCheck e1
+exprCheck (Eq e0 e1)  = exprCheck e0 >> exprCheck e1
+exprCheck (Gt e0 e1)  = exprCheck e0 >> exprCheck e1
+exprCheck (Lt e0 e1)  = exprCheck e0 >> exprCheck e1
+exprCheck (Not e)     = exprCheck e
+exprCheck (Const _)   = return $ Right () -- again for completeness
+exprCheck (Var name) = do
+    states <- get
+    case Map.lookup name states of
+      Just x -> state $ \s -> (Right (), stateTrans name x s)
+      Nothing -> return $ Left $ "Variable " ++ name ++ " used before initialisation"
+
+stateTrans :: Name -> VarState -> VarStates -> VarStates
+stateTrans n Init env = Map.insert n Used env
+stateTrans _ Used env = env
+
+
+program :: Statement
+program = Print (Var "poo")
+
+program1 :: Statement
+program1 = foldl1 Seq [Print (Var "poo"), Print (Var "asdf")]
+
+program2 :: Statement
+program2 = Assign "poo" (Const (I 5))
