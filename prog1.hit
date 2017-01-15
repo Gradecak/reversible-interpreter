@@ -1,0 +1,4 @@
+Seq (Assign "var1" (Const (I 5)))
+(Seq (Assign "var2" (Const (I 10)))
+(Seq (Assign "var3" (Add (Var "var1") (Var "var2"))) (Print (Var "var3"))
+))

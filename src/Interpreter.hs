@@ -2,7 +2,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeSynonymInstances  #-}
 
-module Interpreter where
+module Interpreter (help, interpret, Statement) where
 
 import           Control.Monad          (void, when)
 import           Control.Monad.Except
@@ -35,7 +35,7 @@ type Env  = Map.Map Name Val
 
 lookup k t = case Map.lookup k t of
                Just x  -> return x
-               Nothing -> fail ("Unknown variable "++k)
+               Nothing -> fail ("Unknown variable "++ k)
 
 {-- Monadic style expression evaluator,
  -- with error handling and Reader monad instance to carry dictionary --}
@@ -93,8 +93,8 @@ data Statement = Assign Name Expr
                | Pass
                deriving (Eq, Show, Read)
 
-type Run a = StateT [(Env, Statement)] (ReaderT [Statement] (ExceptT String IO)) a
-runRun p =  runExceptT (runReaderT (runStateT p [(Map.empty, Pass)]) [])
+type Run a = StateT [(Env, Statement)] (ExceptT String IO) a
+runRun p =  runExceptT (runStateT p [(Map.empty, Pass)])
 
 -- setting a variable DOESN'T push a new state to the list.
 -- Instead, it inserts the values into the enviroment found at the head of the list
@@ -130,12 +130,10 @@ exec (If cond s0 s1) = do
     if val then exec s0 else exec s1
 
 exec (Try s0 s1) = catchError (exec s0) (\e -> exec s1)
-
 exec (Seq s0 s1) = exec s0 >> exec s1
-
 exec Pass = return ()
-{-Interpreter Utility Functions-}
 
+{-Interpreter Utility Functions-}
 -- pretty print function for displaying the value of a variable in the enviroment
 pPrintVar :: Name -> Val -> IO ()
 pPrintVar n = putStrLn . ((n ++ " := ") ++) . show
@@ -147,16 +145,18 @@ head' x  = Just $ head x
 -- rollback the state and execute previous statement
 stepback :: Statement -> Run ()
 stepback s = do
-    old@((env, statement):xs) <- get -- get current state of the program
-    put xs                           -- rollback state by 1 entry
-    exec statement                   -- exec rolled back statement
-    put old                          -- when done restore previous state
-    prompt s
+    x <- get
+    if length x == 1
+      then liftIO (putStrLn "no further undo") >> prompt s
+      else do let ((_,statement):xs) = x -- pattern match current state of the program
+              put xs                     -- rollback state by 1 entry
+              exec statement             -- exec rolled back statement (will result in current state)
+              prompt s
 
--- inspect the state of a variable in the current enviroment
+-- inspect the current state of a variable in the Env
 inspectCurrent :: Name -> Run ()
 inspectCurrent name = do
-    ((env,_):_) <- get
+    ((env,_):_) <- get -- pattern match current state
     let x = Map.lookup name env
     liftIO $ case x of
       (Just val) -> pPrintVar name val
@@ -166,74 +166,66 @@ inspectCurrent name = do
 inspectAll :: Name -> Run ()
 inspectAll name = do
     states <- get
-    let envs = map fst states
-        x    = mapMaybe (Map.lookup name) envs
-    liftIO $ mapM_ (pPrintVar name) x
+    let envs = map fst states                  -- change [(Env, Statement)] to [Env]
+        x    = mapMaybe (Map.lookup name) envs -- perform a lookup on our enviroments
+    liftIO $ mapM_ (pPrintVar name) x          -- pretty print all of the past values
 
 prompt :: Statement -> Run ()
 prompt s = do
-    liftIO $ putStrLn $ show s ++ "?"
-    prompt
-  where prompt = do
+    liftIO $ putStrLn $ show s ++ " ?"  -- show statement to be executed
+    p                                   -- prompt user for input
+  where p = do
             liftIO $ putStr ">"
             x <- liftIO $ words <$> getLine
             case head' x of
-              Nothing        -> void $ saveCurrentState s
-              Just "break"   -> void $ liftIO exitSuccess
-              Just "inspect" -> inspectAll (last x) >> prompt
-              Just "back"    -> stepback s
-              _              -> liftIO (putStrLn "unknown command") >> prompt
+              Nothing  -> void $ saveCurrentState s
+              Just "q" -> void $ liftIO exitSuccess
+              Just "i" -> inspectCurrent (last x) >> p
+              Just "b" -> stepback s
+              Just "I" -> inspectAll (last x) >> p
+              _        -> liftIO help >> p
 
 interpret :: Statement -> IO ()
 interpret p = do
-    ((), x) <- runAnal $ analyse p
+    help
+    ((), x) <- runErr $ analyse p
     showWarnings x
     result <- runRun $ exec p
     case result of
       Right ((), env) -> return ()
-      Left exn        ->  System.print ("Uncaught exception: "++exn)
+      Left exn        -> System.print ("Uncaught exception: "++exn)
 
+help :: IO ()
+help =  putStrLn "\ESC[34m (RET)step | (b)ack  | (i)nspect <name> | (I)nspectAll <name> | (q)uit \ESC[0m"
 
-{- Static Analysis functions -}
+{------------------ Static Analysis Section -----------------------------------------}
 
+-- we will use variable states to check if a variable is used
 data VarState = Used   -- Variable Was initialised and Used
               | Init   -- Variable has been initialsed but not used
               deriving (Eq)
 
-type VarStates = Map.Map Name VarState -- a map of variable names to the state of the variables
+type VarStates = Map.Map Name VarState
 
 type Err a = StateT VarStates IO a
-
-runAnal p = runStateT p Map.empty
+runErr p = runStateT p Map.empty
 
 analyse :: Statement -> Err ()
 analyse (Assign name v) = do
     env <- get
+    exprCheck v
     state $ \s -> ((), Map.insert name Init s) -- set var status to initialised
-    return ()
 
-analyse (While expr s) = exprCheck expr >>= showError >> analyse s
-analyse (If expr s0 s1) = exprCheck expr >>= showError >> analyse s0 >> analyse s1
-analyse (Print expr) = exprCheck expr >>= showError
+analyse s@(While expr s0) = exprCheck expr >>= showError s >> analyse s0
+analyse s@(If expr s0 s1) = exprCheck expr >>= showError s >> analyse s0 >> analyse s1
+analyse s@(Print expr) = exprCheck expr >>= showError s
 analyse (Seq s0 s1) = analyse s0 >> analyse s1
 analyse (Try s0 s1) = analyse s0 >> analyse s1
 analyse Pass = return () -- for completeness sake
 
-showError :: Either String () -> Err ()
-showError (Left e)  = void $ liftIO (putStrLn e)
-showError (Right _) = return ()
-
-warningMsg :: (Name, VarState) -> IO ()
-warningMsg (n,_) = putStrLn ("WARNING: " ++ show n ++ " initialsed but never used")
-
-showWarnings :: VarStates -> IO ()
-showWarnings states = do
-    let x = Map.filter (/= Used) states
-        y = Map.toList x
-    mapM_ warningMsg y
-
-exprCheck :: Expr -> Err (Either String ())
 -- we are only interested in expressions where a variable is involved
+-- if only pattern matching on _ for Constructors was an option... :(
+exprCheck :: Expr -> Err (Either String ())
 exprCheck (Add e0 e1) = exprCheck e0 >> exprCheck e1
 exprCheck (Sub e0 e1) = exprCheck e0 >> exprCheck e1
 exprCheck (Mul e0 e1) = exprCheck e0 >> exprCheck e1
@@ -244,23 +236,28 @@ exprCheck (Eq e0 e1)  = exprCheck e0 >> exprCheck e1
 exprCheck (Gt e0 e1)  = exprCheck e0 >> exprCheck e1
 exprCheck (Lt e0 e1)  = exprCheck e0 >> exprCheck e1
 exprCheck (Not e)     = exprCheck e
-exprCheck (Const _)   = return $ Right () -- again for completeness
+exprCheck (Const _)   = return $ Right () -- not needed, here for completeness
 exprCheck (Var name) = do
     states <- get
     case Map.lookup name states of
       Just x -> state $ \s -> (Right (), stateTrans name x s)
-      Nothing -> return $ Left $ "Variable " ++ name ++ " used before initialisation"
+      Nothing -> return $ Left $ "\ESC[31m ERROR: Variable " ++ show name ++ " used before initialisation\ESC[0m"
 
+-- if a var is in the 'init' state, it means we are using it so we change its state to 'used'
+-- if a var is in the 'used' state we leave it there
 stateTrans :: Name -> VarState -> VarStates -> VarStates
 stateTrans n Init env = Map.insert n Used env
-stateTrans _ Used env = env
+stateTrans _ _ env = env
 
+showError :: Statement -> Either String () -> Err ()
+showError s (Left e)  = void $ liftIO (putStrLn $ e ++ " @ " ++ show s)
+showError _ (Right _) = return ()
 
-program :: Statement
-program = Print (Var "poo")
+showWarnings :: VarStates -> IO ()
+showWarnings states = do
+    let x = Map.filter (/= Used) states -- find all of the variables still in 'Init' state
+        y = Map.toList x
+    mapM_ warningMsg y
 
-program1 :: Statement
-program1 = foldl1 Seq [Print (Var "poo"), Print (Var "asdf")]
-
-program2 :: Statement
-program2 = Assign "poo" (Const (I 5))
+warningMsg :: (Name, VarState) -> IO ()
+warningMsg (n,_) = putStrLn ("\ESC[33m WARNING: " ++ show n ++ " initialsed but never used\ESC[0m")

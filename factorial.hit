@@ -1,0 +1,5 @@
+Seq (Assign "i" (Const (I 4))) (Seq (Assign "x" (Add (Var "i") (Const (I 1))))
+(Seq (While (Gt (Var "i") (Const (I 0)))
+     (Seq (Assign "x" (Mul (Var "i") (Var "x")))
+          (Assign "i" (Sub (Var "i") (Const (I 1))))))
+(Seq (Print (Var "x")) (Print (Var "i" )))))
