@@ -1,26 +1,20 @@
---I want these language extensions for my syntactic sugaring tricks at the end
-
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeSynonymInstances  #-}
 
---I want my own definition of lookup and I want to write my own function
---named "print".
 module Interpreter where
 
-import qualified Data.Map               as Map
-import           Data.Maybe
-import           Prelude                hiding (lookup, print)
--- I want to get at the standard "print" function using the name System.print
-import qualified System.IO              as System
--- I plan to use these monads to construct the parts of my interpreter
+import           Control.Monad          (void, when)
 import           Control.Monad.Except
 import           Control.Monad.Identity
 import           Control.Monad.Reader
 import           Control.Monad.State
-import Control.Monad (void, when)
 import           Control.Monad.Writer
-import System.Exit (exitSuccess)
+import qualified Data.Map               as Map
+import           Data.Maybe
+import           Prelude                hiding (lookup, print)
+import           System.Exit            (exitSuccess)
+import qualified System.IO              as System
 
 {-------------------------------------------------------------------}
 {- The pure expression language                                    -}
@@ -130,8 +124,16 @@ exec p@(While cond s) = do
     Right (B val) <- return $ runEval env (eval cond)
     when val $ exec s >> prompt p >> exec (While cond s)
 
+exec (If cond s0 s1) = do
+    ((env,_):_) <- get
+    Right (B val) <- return $ runEval env (eval cond)
+    if val then exec s0 else exec s1
+
+exec (Try s0 s1) = catchError (exec s0) (\e -> exec s1)
+
 exec (Seq s0 s1) = exec s0 >> exec s1
 
+exec Pass = return ()
 {-Interpreter Utility Functions-}
 
 -- pretty print function for displaying the value of a variable in the enviroment
@@ -188,13 +190,3 @@ interpret p = do
     case result of
       Right ((), env) -> return ()
       Left exn        ->  System.print ("Uncaught exception: "++exn)
-
-{-Test Programs-}
-program2 :: Statement
-program2 = foldl1 Seq [Assign "poo" (Const (I 5)),
-                       Assign "var" (Const (I 1)),
-                       Assign "poo" (Const (I 6)),
-                       While (Gt (Var "poo") (Const (I 4))) (Print (Var "poo")),
-                       Assign "poo" (Const (I 7)),
-                       Print (Var "poo"),
-                       Print (Var "var")]
